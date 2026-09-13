@@ -1,0 +1,35 @@
+# Multilingual Text Clustering Pipeline - full dependency set.
+# For stage 1 only you just need: datasets
+#
+#   python3 -m venv .venv && source .venv/bin/activate
+#   pip install --upgrade pip
+#   pip install -r requirements.txt
+#
+# NOTE on torch: the default `pip install torch` wheel on Linux ships CUDA 12.x
+# and works on the RTX 4050 (Ada / sm_89). If pip resolves a CPU-only build,
+# install explicitly:
+#   pip install torch --index-url https://download.pytorch.org/whl/cu124
+
+# ---- Stage 1: data acquisition ----
+datasets>=2.19
+huggingface-hub>=0.23
+
+# ---- Stage 2: cleaning & sentence splitting ----
+spacy>=3.7,<4.0
+
+# ---- Stage 3: embeddings ----
+torch>=2.2
+transformers>=4.40
+
+# ---- Stage 4-5: dimensionality reduction & clustering ----
+scikit-learn>=1.4
+umap-learn>=0.5.5
+hdbscan>=0.8.33
+# umap-learn + hdbscan pull `numba`, which tracks NumPy support slowly.
+# Pin <2 to avoid import-time ABI errors; relax once your stack is happy.
+numpy<2
+
+# ---- shared / IO / progress ----
+pandas>=2.2
+pyarrow>=15.0
+tqdm>=4.66

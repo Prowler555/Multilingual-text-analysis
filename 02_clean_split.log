@@ -1,1 +1,0 @@
-16:43:08  INFO     target=1,200,000 sentences  min_chars=30  max_chars=400  max_digit_frac=0.30  n_process=18  batch_size=200

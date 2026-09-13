@@ -1,0 +1,27 @@
+# --- virtualenv ---
+.venv/
+venv/
+
+# --- python ---
+__pycache__/
+*.py[cod]
+*.egg-info/
+.ipynb_checkpoints/
+
+# --- pipeline runtime artefacts (regenerate by rerunning the stage) ---
+data/            # raw JSONL, clean sentences, embedding memmaps
+cache/           # Hugging Face datasets + model weights
+logs/
+models/
+
+# large binary results - keep metrics.json / *.md / plots, drop the arrays
+results/*.npy
+results/*.memmap
+results/*.mmap
+results/*.parquet
+*.memmap
+*.mmap
+
+# --- os cruft ---
+.DS_Store
+Thumbs.db

@@ -1,3 +1,0 @@
-23:44:11  INFO     source=wikimedia/wikipedia  snapshot=20231101  langs=en,es,fr,de,ru,zh,ja,ar  cap=4.0GB
-23:44:11  INFO     disk: need ~4.6GB of new data, 50.5GB free at /home/harsh/multilingual-text-clustering/data/raw
-23:44:11  INFO     dry-run: round-robin 8 languages (~512.0MB each) into 512MB JSONL shards under /home/harsh/multilingual-text-clustering/data/raw

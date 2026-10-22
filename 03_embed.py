@@ -3,7 +3,7 @@
 
 Reads the clean-sentence parquet shards from stage 2 and embeds every
 sentence with XLM-RoBERTa base (mean/CLS pooling - TBD), batched, in fp16,
-on the GPU (RTX 4060 Laptop, 8 GB VRAM). Embeddings are written straight to a
+on the GPU (RTX 4050, 6 GB VRAM). Embeddings are written straight to a
 pre-sized float16 memmap on disk so the full matrix never has to fit in RAM
 or VRAM at once.
 
@@ -35,7 +35,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 import config as C
-from pipeline_common import fmt_eta, human_int, setup_logging
+from pipeline_common import human_int, setup_logging
 
 LOG = setup_logging("03_embed", C.LOG_DIR)
 MANIFEST = C.EMB_DIR / "manifest.json"
@@ -59,155 +59,43 @@ def parse_args() -> argparse.Namespace:
 def count_sentences(shards: list[Path]) -> int:
     """Total row count across all stage-2 parquet shards.
 
-    Reads only each shard's footer metadata (num_rows) - never loads the
-    sentence column just to count.
+    TODO: cheapest way is `pyarrow.parquet.ParquetFile(p).metadata.num_rows`
+    per shard, summed - avoids loading actual sentence text just to count.
     """
-    import pyarrow.parquet as pq
-
-    return sum(pq.ParquetFile(p).metadata.num_rows for p in shards)
-
-
-def resolve_device(requested: str | None) -> str:
-    """Pick the compute device: explicit --device, else cuda if available."""
-    import torch
-
-    if requested:
-        return requested
-    return "cuda" if torch.cuda.is_available() else "cpu"
+    raise NotImplementedError
 
 
 def load_model(model_name: str, device: str):
-    """Load tokenizer + model on `device`; fp16 on GPU, fp32 on CPU.
+    """Load tokenizer + model in fp16 on `device`.
 
-    fp16 is the whole point on the 8 GB GPU, but half-precision matmul isn't
-    supported for most ops on CPU, so the CPU debug path falls back to fp32.
-    Embeddings are cast to fp16 for storage regardless (see `embed_batch`).
+    TODO: `AutoTokenizer.from_pretrained`, `AutoModel.from_pretrained(...,
+    torch_dtype=torch.float16).to(device).eval()`.
     """
-    import torch
-    from transformers import AutoModel, AutoTokenizer
-
-    dtype = torch.float16 if device == "cuda" else torch.float32
-    tokenizer = AutoTokenizer.from_pretrained(model_name)
-    model = AutoModel.from_pretrained(model_name, torch_dtype=dtype).to(device).eval()
-    return tokenizer, model
+    raise NotImplementedError
 
 
 def embed_batch(tokenizer, model, sentences: list[str], max_tokens: int, device: str):
-    """Tokenize + forward pass -> mean-pooled fp16 embeddings for one batch.
+    """Tokenize + forward pass -> pooled embeddings for one batch.
 
-    Returns an (len(sentences), hidden_size) float16 numpy array on the CPU.
+    TODO: tokenize with padding/truncation to max_tokens, run under
+    `torch.no_grad()`, mean-pool the last hidden state over the attention
+    mask, cast to float16, move to CPU/numpy.
     """
-    import torch
-
-    enc = tokenizer(
-        sentences,
-        padding=True,
-        truncation=True,
-        max_length=max_tokens,
-        return_tensors="pt",
-    ).to(device)
-
-    with torch.no_grad():
-        hidden = model(**enc).last_hidden_state  # (b, seq, dim)
-
-    # Mean-pool over real (non-pad) tokens only.
-    mask = enc["attention_mask"].unsqueeze(-1).to(hidden.dtype)  # (b, seq, 1)
-    summed = (hidden * mask).sum(dim=1)
-    counts = mask.sum(dim=1).clamp(min=1.0)
-    pooled = summed / counts
-
-    return pooled.to(torch.float16).cpu().numpy()
-
-
-def iter_sentences(shards: list[Path]):
-    """Yield (id, lang, sentence) across all shards, one shard in RAM at a time."""
-    import pandas as pd
-
-    for shard in shards:
-        df = pd.read_parquet(shard, columns=["id", "lang", "sentence"])
-        for id_, lang, sent in zip(df["id"], df["lang"], df["sentence"]):
-            yield id_, lang, sent
+    raise NotImplementedError
 
 
 def run(args: argparse.Namespace, shards: list[Path], n_total: int) -> dict:
-    """Iterate every stage-2 shard, embed in batches, write into the memmap."""
-    import numpy as np
-    import pyarrow as pa
-    import pyarrow.parquet as pq
+    """Iterate every stage-2 shard, embed in batches, write into the memmap.
 
-    device = resolve_device(args.device)
-    LOG.info("loading %s on %s ...", args.model, device)
-    tokenizer, model = load_model(args.model, device)
-
-    emb_dim = int(model.config.hidden_size)
-    if emb_dim != C.EMB_DIM:
-        LOG.warning("model hidden_size=%d != config EMB_DIM=%d; using the model's "
-                    "value and recording it in the manifest", emb_dim, C.EMB_DIM)
-
-    emb = np.memmap(MEMMAP_PATH, mode="w+", dtype=np.float16, shape=(n_total, emb_dim))
-
-    ids_buf: list[str] = []
-    langs_buf: list[str] = []
-    sent_buf: list[str] = []
-    per_lang: dict[str, int] = {}
-
-    batch_sents: list[str] = []
-    offset = 0
-    t0 = time.time()
-    last_log = t0
-
-    def flush_batch() -> None:
-        nonlocal offset, last_log
-        if not batch_sents:
-            return
-        vecs = embed_batch(tokenizer, model, batch_sents, args.max_tokens, device)
-        emb[offset:offset + len(batch_sents)] = vecs
-        offset += len(batch_sents)
-        batch_sents.clear()
-        now = time.time()
-        if now - last_log >= 5.0:
-            rate = offset / max(1e-6, now - t0)
-            eta = (n_total - offset) / rate if rate > 0 else 0.0
-            LOG.info("%s / %s embedded  (%.0f sent/s, ETA %s)",
-                     human_int(offset), human_int(n_total), rate, fmt_eta(eta))
-            last_log = now
-
-    for id_, lang, sent in iter_sentences(shards):
-        ids_buf.append(id_)
-        langs_buf.append(lang)
-        sent_buf.append(sent)
-        per_lang[lang] = per_lang.get(lang, 0) + 1
-        batch_sents.append(sent)
-        if len(batch_sents) >= args.batch_size:
-            flush_batch()
-    flush_batch()  # trailing partial batch
-
-    emb.flush()
-    del emb
-
-    if offset != n_total:
-        LOG.warning("embedded %d rows but counted %d - memmap/ids may be misaligned",
-                    offset, n_total)
-
-    # Row i of ids.parquet lines up with row i of the memmap.
-    pq.write_table(
-        pa.table({"id": ids_buf, "lang": langs_buf, "sentence": sent_buf}),
-        IDS_PATH,
-        compression="zstd",
-    )
-    LOG.info("wrote %s (%s rows)", IDS_PATH, human_int(len(ids_buf)))
-
-    return {
-        "model": args.model,
-        "device": device,
-        "n_sentences": offset,
-        "emb_dim": emb_dim,
-        "dtype": C.EMB_DTYPE,
-        "batch_size": args.batch_size,
-        "max_tokens": args.max_tokens,
-        "pooling": "mean",
-        "per_language": dict(sorted(per_lang.items())),
-    }
+    TODO:
+      - open MEMMAP_PATH as np.memmap(mode="w+", shape=(n_total, EMB_DIM), dtype=float16)
+      - stream sentences shard by shard (pandas.read_parquet per shard, not all at once)
+      - batch into groups of args.batch_size, call embed_batch(), write rows at the
+        right offset, flush the memmap
+      - append (id, lang, sentence) rows to an ids buffer -> write ids.parquet at the end
+    Returns a dict of stats for the manifest.
+    """
+    raise NotImplementedError
 
 
 def write_manifest(stats: dict, t0: float) -> None:

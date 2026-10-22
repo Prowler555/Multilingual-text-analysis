@@ -32,8 +32,6 @@ from pipeline_common import human_int, setup_logging
 LOG = setup_logging("06_evaluate", C.LOG_DIR)
 METRICS_PATH = C.RESULTS_DIR / "metrics.json"
 GRID_REPORT_PATH = C.RESULTS_DIR / "cluster_grid_report.json"
-STAGE5_MANIFEST = C.RESULTS_DIR / "manifest.json"
-UMAP_MEMMAP_PATH = C.REDUCE_DIR / "umap.f32.memmap"
 README_PATH = C.ROOT / "README.md"
 
 
@@ -49,92 +47,45 @@ def parse_args() -> argparse.Namespace:
 
 
 def load_grid_report() -> dict:
-    """Read stage-5's cluster_grid_report.json."""
-    return json.loads(GRID_REPORT_PATH.read_text(encoding="utf-8"))
+    """Read stage-5's cluster_grid_report.json.
+
+    TODO: json.loads(GRID_REPORT_PATH).
+    """
+    raise NotImplementedError
 
 
 def pick_grid_entry(report: dict, grid_index: int | None) -> int:
     """Choose which grid entry to score.
 
-    Explicit --grid-index wins. Otherwise pick the lowest noise fraction among
-    entries with >= 2 clusters (tie-break: more clusters). This avoids rewarding
-    a tiny min_cluster_size that "gams" the count with many micro-clusters.
+    TODO: if grid_index is given, use it; otherwise pick a reasonable default
+    (e.g. fewest noise points among entries with a sane cluster count, not
+    just "most clusters" which HDBSCAN can game with tiny min_cluster_size).
     """
-    entries = report["entries"]
-    if grid_index is not None:
-        if not (0 <= grid_index < len(entries)):
-            raise SystemExit(f"--grid-index {grid_index} out of range (0..{len(entries) - 1})")
-        return grid_index
-
-    candidates = [e for e in entries if e["n_clusters"] >= 2] or entries
-    best = min(candidates, key=lambda e: (e["noise_frac"], -e["n_clusters"]))
-    LOG.info("auto-picked grid %d (%s): %d clusters, %.1f%% noise",
-             best["index"], best["params"], best["n_clusters"], 100 * best["noise_frac"])
-    return int(best["index"])
+    raise NotImplementedError
 
 
 def compute_silhouette(grid_index: int, sample_size: int) -> float:
     """Silhouette score on a fixed random sample of the chosen grid entry.
 
-    Scored in the SAME space stage 5 clustered in (the UMAP projection), with
-    euclidean distance. Noise points (label == -1) are dropped first - silhouette
-    is undefined for the catch-all noise "cluster".
+    TODO:
+      - load results/labels_grid{grid_index}.npy and the UMAP or PCA memmap
+        the labels were computed on (use the same space as stage 5)
+      - drop noise points (label == -1) before sampling, or keep them and
+        note it explicitly - decide once and document it here
+      - np.random.RandomState(C.RANDOM_SEED).choice(..., size=sample_size)
+      - sklearn.metrics.silhouette_score(X_sample, labels_sample)
     """
-    import numpy as np
-    from sklearn.metrics import silhouette_score
-
-    labels = np.load(C.RESULTS_DIR / f"labels_grid{grid_index}.npy")
-    man = json.loads(STAGE5_MANIFEST.read_text(encoding="utf-8"))
-    n_total = int(man["n_sentences"])
-    n_comp = int(man["umap"]["n_components"])
-    X = np.asarray(np.memmap(UMAP_MEMMAP_PATH, dtype=np.float32, mode="r",
-                             shape=(n_total, n_comp)))
-
-    keep = labels != -1
-    X_valid, labels_valid = X[keep], labels[keep]
-    n_valid = int(labels_valid.size)
-    if np.unique(labels_valid).size < 2:
-        LOG.warning("fewer than 2 non-noise clusters - silhouette undefined (nan)")
-        return float("nan")
-
-    rng = np.random.RandomState(C.RANDOM_SEED)
-    if n_valid > sample_size:
-        idx = rng.choice(n_valid, size=sample_size, replace=False)
-        X_s, labels_s = X_valid[idx], labels_valid[idx]
-        if np.unique(labels_s).size < 2:  # unlucky sample collapsed to one cluster
-            LOG.warning("sample collapsed to one cluster - scoring all non-noise points")
-            X_s, labels_s = X_valid, labels_valid
-    else:
-        X_s, labels_s = X_valid, labels_valid
-
-    LOG.info("silhouette on %s of %s non-noise points",
-             human_int(labels_s.size), human_int(n_valid))
-    return float(silhouette_score(X_s, labels_s, metric="euclidean"))
+    raise NotImplementedError
 
 
 def gather_dataset_stats() -> dict:
     """Pull real counts from every prior stage's manifest.json for the README.
 
-    Only numbers a manifest actually recorded - missing manifests degrade to
-    'n/a'/0 rather than invented placeholders.
+    TODO: read manifest.json from RAW_DIR, SENT_DIR, EMB_DIR to report
+    dataset size (stage 1), clean sentence count (stage 2), etc. - no
+    placeholders, only numbers a manifest actually recorded.
     """
-    def _load(path: Path) -> dict:
-        try:
-            return json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, ValueError):
-            return {}
-
-    s1 = _load(C.RAW_DIR / "manifest.json")
-    s2 = _load(C.SENT_DIR / "manifest.json")
-    s3 = _load(C.EMB_DIR / "manifest.json")
-    return {
-        "dataset_size_human": s1.get("text_human", "n/a"),
-        "dataset_text_bytes": s1.get("text_bytes"),
-        "articles_total": s1.get("articles_total"),
-        "languages": s1.get("languages"),
-        "clean_sentences": int(s2.get("sentences_kept", 0)),
-        "embedded_sentences": s3.get("n_sentences"),
-    }
+    raise NotImplementedError
 
 
 def write_metrics(stats: dict) -> None:
@@ -183,7 +134,6 @@ def main() -> None:
     t0 = time.time()
     report = load_grid_report()
     grid_index = pick_grid_entry(report, args.grid_index)
-    n_clusters = int(report["entries"][grid_index]["n_clusters"])
     silhouette = compute_silhouette(grid_index, args.silhouette_sample)
     dataset_stats = gather_dataset_stats()
 
@@ -191,7 +141,6 @@ def main() -> None:
         "stage": "06_evaluate",
         "grid_index": grid_index,
         "grid_params": C.HDBSCAN_GRID[grid_index],
-        "n_clusters": n_clusters,
         "silhouette_score": silhouette,
         "silhouette_sample": args.silhouette_sample,
         **dataset_stats,

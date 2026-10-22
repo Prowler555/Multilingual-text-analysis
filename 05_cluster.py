@@ -50,44 +50,105 @@ def parse_args() -> argparse.Namespace:
 
 
 def load_reduced_meta() -> dict:
-    """Read stage-4's manifest.json to get n_sentences / pca_dims.
-
-    TODO: json.loads(C.REDUCE_DIR / "manifest.json").
-    """
-    raise NotImplementedError
+    """Read stage-4's manifest.json to get n_sentences / pca_dims."""
+    man = json.loads((C.REDUCE_DIR / "manifest.json").read_text(encoding="utf-8"))
+    return {"n_sentences": int(man["n_sentences"]), "pca_dims": int(man["pca_dims"])}
 
 
 def run_umap(args: argparse.Namespace, n_total: int) -> Path:
     """Fit UMAP over the PCA memmap and write the projection to a new memmap.
 
-    TODO:
-      - open C.REDUCE_DIR / "pca50.f32.memmap" read-only with shape from
-        load_reduced_meta()
-      - umap.UMAP(n_neighbors=args.n_neighbors, min_dist=args.min_dist,
-        n_components=args.n_components, metric=args.metric,
-        low_memory=C.UMAP_LOW_MEMORY, random_state=C.RANDOM_SEED).fit_transform(...)
-        (note: UMAP wants the array in memory, so this is the point where the
-        pipeline needs PCA_DIMS to already be small - keep an eye on RAM here)
-      - write the result to UMAP_MEMMAP_PATH
-    Returns the path written.
+    UMAP needs the input array in memory, which is why stage 4 reduces to a small
+    PCA_DIMS first: (n, pca_dims) float32 is a few hundred MB even at 1.2M rows.
     """
-    raise NotImplementedError
+    import numpy as np
+    import umap
+
+    pca_dims = load_reduced_meta()["pca_dims"]
+    pca = np.memmap(C.REDUCE_DIR / "pca50.f32.memmap", dtype=np.float32, mode="r",
+                    shape=(n_total, pca_dims))
+    X = np.asarray(pca)  # materialize for UMAP
+
+    LOG.info("fitting UMAP(n_neighbors=%d, min_dist=%.2f, n_components=%d, metric=%s) "
+             "on %s x %d ...", args.n_neighbors, args.min_dist, args.n_components,
+             args.metric, human_int(n_total), pca_dims)
+    reducer = umap.UMAP(
+        n_neighbors=args.n_neighbors,
+        min_dist=args.min_dist,
+        n_components=args.n_components,
+        metric=args.metric,
+        low_memory=C.UMAP_LOW_MEMORY,
+        random_state=C.RANDOM_SEED,
+    )
+    proj = np.asarray(reducer.fit_transform(X), dtype=np.float32)
+
+    out = np.memmap(UMAP_MEMMAP_PATH, dtype=np.float32, mode="w+",
+                    shape=(n_total, args.n_components))
+    out[:] = proj
+    out.flush()
+    del out
+    LOG.info("wrote UMAP projection -> %s  (%s x %d)",
+             UMAP_MEMMAP_PATH, human_int(n_total), args.n_components)
+    return UMAP_MEMMAP_PATH
 
 
 def run_hdbscan_grid(umap_path: Path, n_total: int, args: argparse.Namespace) -> dict:
-    """Run HDBSCAN for every entry in C.HDBSCAN_GRID, save labels + a report.
+    """Run HDBSCAN for every entry in C.HDBSCAN_GRID, save labels + a report."""
+    import hdbscan
+    import numpy as np
 
-    TODO:
-      - open umap_path memmap read-only
-      - for each {min_cluster_size, min_samples} in C.HDBSCAN_GRID:
-          hdbscan.HDBSCAN(**params).fit_predict(X)
-          save labels to results/labels_grid{i}.npy
-          record n_clusters, n_noise, cluster size histogram (min/median/max)
-      - write GRID_REPORT_PATH with one entry per grid point
-    Returns a dict of stats for the manifest (e.g. which grid index looked best
-    by cluster count alone - stage 6 does the real scoring).
-    """
-    raise NotImplementedError
+    X = np.asarray(np.memmap(umap_path, dtype=np.float32, mode="r",
+                             shape=(n_total, args.n_components)))
+
+    entries = []
+    for i, params in enumerate(C.HDBSCAN_GRID):
+        LOG.info("hdbscan grid %d/%d: %s", i + 1, len(C.HDBSCAN_GRID), params)
+        labels = hdbscan.HDBSCAN(**params).fit_predict(X)
+
+        labels_path = C.RESULTS_DIR / f"labels_grid{i}.npy"
+        np.save(labels_path, labels)
+
+        n_noise = int((labels == -1).sum())
+        _, counts = np.unique(labels[labels != -1], return_counts=True)
+        n_clusters = int(counts.size)
+        sizes = (
+            {"min": int(counts.min()), "median": int(np.median(counts)), "max": int(counts.max())}
+            if n_clusters else {"min": 0, "median": 0, "max": 0}
+        )
+        entry = {
+            "index": i,
+            "params": params,
+            "n_clusters": n_clusters,
+            "n_noise": n_noise,
+            "noise_frac": round(n_noise / max(1, n_total), 4),
+            "cluster_sizes": sizes,
+            "labels_path": labels_path.name,
+        }
+        entries.append(entry)
+        LOG.info("  -> %d clusters, %s noise (%.1f%%), sizes min/med/max %d/%d/%d",
+                 n_clusters, human_int(n_noise), 100 * entry["noise_frac"],
+                 sizes["min"], sizes["median"], sizes["max"])
+
+    report = {"stage": "05_cluster", "n_sentences": int(n_total), "entries": entries}
+    GRID_REPORT_PATH.write_text(json.dumps(report, indent=2, ensure_ascii=False), encoding="utf-8")
+    LOG.info("wrote %s", GRID_REPORT_PATH)
+
+    # "Looks best" by cluster count/noise alone - stage 6 does the real silhouette
+    # scoring. Prefer the lowest noise fraction among entries with >= 2 clusters.
+    candidates = [e for e in entries if e["n_clusters"] >= 2] or entries
+    best = min(candidates, key=lambda e: (e["noise_frac"], -e["n_clusters"]))
+
+    return {
+        "n_sentences": int(n_total),
+        "umap": {
+            "n_neighbors": args.n_neighbors,
+            "min_dist": args.min_dist,
+            "n_components": args.n_components,
+            "metric": args.metric,
+        },
+        "grid_size": len(C.HDBSCAN_GRID),
+        "best_grid_index_by_noise": best["index"],
+    }
 
 
 def write_manifest(stats: dict, t0: float) -> None:

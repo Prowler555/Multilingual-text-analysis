@@ -48,6 +48,11 @@ TARGET_SENTENCES   = 1_200_000   # (TUNE) stop once we have this many clean sent
 SENT_MIN_CHARS     = 30          # too short -> fragment / boilerplate
 SENT_MAX_CHARS     = 400         # too long  -> list dump / unsplit table
 SENT_MAX_DIGIT_FRAC = 0.30       # drop lines that are mostly numbers
+# CJK (zh/ja) has no word spaces and is information-dense: a full sentence is only
+# a handful of characters, so the Latin-tuned window above would drop nearly all
+# real CJK text. Stage 2 detects CJK by script and applies this smaller window.
+SENT_CJK_MIN_CHARS = 6
+SENT_CJK_MAX_CHARS = 140
 N_PROCESS          = max(1, (os.cpu_count() or 4) - 2)   # spaCy nlp.pipe workers
 SPACY_BATCH_SIZE   = 200
 
@@ -56,7 +61,7 @@ SPACY_BATCH_SIZE   = 200
 # ---------------------------------------------------------------------------
 EMB_MODEL      = "xlm-roberta-base"
 EMB_DIM        = 768
-EMB_BATCH      = 128        # (TUNE) drop to 64/32 if you see CUDA OOM
+EMB_BATCH      = 128        # (TUNE) safe on 8 GB; raise to ~192-256 for speed, drop to 64/32 on OOM
 EMB_MAX_TOKENS = 64         # short cap - sentence-level text is fine here
 EMB_DTYPE      = "float16"  # memmap dtype on disk
 

@@ -48,25 +48,85 @@ def parse_args() -> argparse.Namespace:
 def load_embeddings_meta() -> dict:
     """Read stage-3's manifest.json to get n_sentences / dim without opening the memmap.
 
-    TODO: json.loads(C.EMB_DIR / "manifest.json"), pull row count + EMB_DIM.
+    Stage 3 records the embedding width as `emb_dim` (taken from the model, not
+    the config constant); we expose it here as `dim`.
     """
-    raise NotImplementedError
+    man = json.loads((C.EMB_DIR / "manifest.json").read_text(encoding="utf-8"))
+    return {"n_sentences": int(man["n_sentences"]), "dim": int(man["emb_dim"])}
 
 
-def fit_incremental_pca(emb_memmap, n_total: int, args: argparse.Namespace):
+def _fit_chunks(n_total: int, bs: int, k: int):
+    """Yield (start, end) fit-chunk bounds, each with >= k rows.
+
+    IncrementalPCA.partial_fit requires n_samples >= n_components per call, so a
+    trailing chunk shorter than k is folded into the preceding one.
+    """
+    start = 0
+    while start < n_total:
+        end = min(start + bs, n_total)
+        if 0 < n_total - end < k:  # absorb a too-short remainder now
+            end = n_total
+        yield start, end
+        start = end
+
+
+def fit_incremental_pca(emb_memmap, n_total: int, args: argparse.Namespace) -> dict:
     """Two-pass IncrementalPCA: partial_fit over chunks, then transform chunks.
 
-    TODO:
-      - open the stage-3 memmap read-only with the shape from load_embeddings_meta()
-      - IncrementalPCA(n_components=args.pca_dims), loop partial_fit over
-        chunks of args.batch_size rows (cast float16 -> float32 per chunk)
-      - open MEMMAP_PATH as np.memmap(mode="w+", shape=(n_total, args.pca_dims), dtype=float32)
-      - second pass: transform() each chunk, write into the output memmap
-      - joblib.dump the fitted PCA to MODEL_PATH (explained_variance_ratio_ is
-        useful to log/record here)
-    Returns a dict of stats for the manifest.
+    `emb_memmap` is unused (main passes None) - the stage-3 memmap is opened here
+    read-only so this function owns the whole PCA lifecycle.
     """
-    raise NotImplementedError
+    import joblib
+    import numpy as np
+    from sklearn.decomposition import IncrementalPCA
+
+    meta = load_embeddings_meta()
+    dim, k, bs = meta["dim"], args.pca_dims, args.batch_size
+    if n_total < k:
+        raise SystemExit(f"need at least {k} sentences for {k}-dim PCA, have {n_total}")
+
+    emb = np.memmap(C.EMB_DIR / "emb.f16.memmap", dtype=np.float16, mode="r",
+                    shape=(n_total, dim))
+    pca = IncrementalPCA(n_components=k)
+
+    # Pass 1: fit. float16 -> float32 per chunk so the full matrix never lands in RAM.
+    LOG.info("pass 1/2: fitting IncrementalPCA(%d) over %s rows (%d -> %d) ...",
+             k, human_int(n_total), dim, k)
+    last_log = time.time()
+    for start, end in _fit_chunks(n_total, bs, k):
+        pca.partial_fit(np.asarray(emb[start:end], dtype=np.float32))
+        if time.time() - last_log >= 5.0:
+            LOG.info("  fit %s / %s", human_int(end), human_int(n_total))
+            last_log = time.time()
+
+    # Pass 2: transform into the output memmap.
+    out = np.memmap(MEMMAP_PATH, dtype=np.float32, mode="w+", shape=(n_total, k))
+    LOG.info("pass 2/2: transforming -> %s", MEMMAP_PATH)
+    last_log = time.time()
+    start = 0
+    while start < n_total:
+        end = min(start + bs, n_total)
+        out[start:end] = pca.transform(np.asarray(emb[start:end], dtype=np.float32))
+        start = end
+        if time.time() - last_log >= 5.0:
+            LOG.info("  transform %s / %s", human_int(end), human_int(n_total))
+            last_log = time.time()
+    out.flush()
+    del out
+
+    joblib.dump(pca, MODEL_PATH)
+    evr = pca.explained_variance_ratio_
+    evr_sum = float(evr.sum())
+    LOG.info("saved %s; explained variance (sum of %d comps) = %.4f", MODEL_PATH, k, evr_sum)
+
+    return {
+        "n_sentences": int(n_total),
+        "input_dim": int(dim),
+        "pca_dims": int(k),
+        "batch_size": int(bs),
+        "explained_variance_ratio_sum": evr_sum,
+        "dtype": "float32",
+    }
 
 
 def write_manifest(stats: dict, t0: float) -> None:

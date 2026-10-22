@@ -6,7 +6,7 @@
 #   pip install -r requirements.txt
 #
 # NOTE on torch: the default `pip install torch` wheel on Linux ships CUDA 12.x
-# and works on the RTX 4060 Laptop (Ada / sm_89). If pip resolves a CPU-only build,
+# and works on the RTX 4050 (Ada / sm_89). If pip resolves a CPU-only build,
 # install explicitly:
 #   pip install torch --index-url https://download.pytorch.org/whl/cu124
 

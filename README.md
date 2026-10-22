@@ -2,7 +2,7 @@
 
 End-to-end, memory-aware NLP pipeline that cleans raw multilingual text,
 generates sentence embeddings, reduces them, and clusters them to discover
-topics. Built to run on a single workstation (RTX 4050 6 GB VRAM, 24 GB RAM):
+topics. Built to run on a single workstation (RTX 4060 Laptop 8 GB VRAM, 24 GB RAM):
 every stage streams, batches, or memmaps its data instead of loading it whole.
 
 > **Status:** stage 1 (data acquisition) implemented. Stages 2-6 are
